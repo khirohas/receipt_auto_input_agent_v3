@@ -258,24 +258,9 @@ function getAccountInfo(itemName) {
   };
 }
 
-// ファイルアップロードAPI
+// ファイルアップロードAPI（Vercel対応）
 const uploadSingle = multer({
-  storage: multer.diskStorage({
-    destination: (req, file, cb) => {
-      const uploadDir = 'uploads';
-      if (!fs.existsSync(uploadDir)) {
-        fs.mkdirSync(uploadDir);
-      }
-      cb(null, uploadDir);
-    },
-    filename: (req, file, cb) => {
-      console.log('originalname:', file.originalname);
-      // latin1→utf8変換＋URLエンコード
-      const original = Buffer.from(file.originalname, 'latin1').toString('utf8');
-      const encodedName = Date.now() + '-' + encodeURIComponent(original);
-      cb(null, encodedName);
-    }
-  }),
+  storage: multer.memoryStorage(), // メモリストレージを使用
   fileFilter: (req, file, cb) => {
     if (file.mimetype.startsWith('image/')) {
       cb(null, true);
@@ -285,36 +270,37 @@ const uploadSingle = multer({
   }
 });
 
+// メモリ内でファイルを管理
+const fileStorage = new Map();
+
 app.post('/api/upload', uploadSingle.single('file'), (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: 'ファイルがアップロードされていません' });
   }
-  res.json({ success: true, file: req.file.filename });
+  
+  const fileId = Date.now() + '-' + Math.random().toString(36).substr(2, 9);
+  const originalName = Buffer.from(req.file.originalname, 'latin1').toString('utf8');
+  
+  // メモリに保存
+  fileStorage.set(fileId, {
+    buffer: req.file.buffer,
+    originalname: originalName,
+    mimetype: req.file.mimetype,
+    size: req.file.size,
+    uploadTime: new Date()
+  });
+  
+  res.json({ success: true, file: fileId, originalName: originalName });
 });
 
 // ファイルリスト取得API
 app.get('/api/files', (req, res) => {
-  const uploadDir = 'uploads';
-  if (!fs.existsSync(uploadDir)) {
-    return res.json([]);
-  }
-  const files = fs.readdirSync(uploadDir).map(name => {
-    const stat = fs.statSync(path.join(uploadDir, name));
-    // 拡張子前の部分だけdecode
-    const parts = name.split('-');
-    const encoded = parts.slice(1).join('-');
-    let decoded = '';
-    try {
-      decoded = decodeURIComponent(encoded);
-    } catch {
-      decoded = encoded;
-    }
-    return {
-      name: decoded,
-      size: stat.size,
-      date: stat.birthtime
-    };
-  });
+  const files = Array.from(fileStorage.entries()).map(([fileId, fileData]) => ({
+    id: fileId,
+    name: fileData.originalname,
+    size: fileData.size,
+    date: fileData.uploadTime
+  }));
   res.json(files);
 });
 
@@ -338,10 +324,9 @@ const ACCOUNT_MAPPING = {
   '交際費': '接待交際費'
 };
 
-// OCR処理関数
-async function processReceiptOCR(imagePath) {
+// OCR処理関数（Vercel対応）
+async function processReceiptOCR(imageBuffer) {
   try {
-    const imageBuffer = fs.readFileSync(imagePath);
     const base64Image = imageBuffer.toString('base64');
 
     // 会計マスタデータから主要な科目・補助科目の例を抽出
@@ -844,45 +829,45 @@ async function generateExcelFile(receiptData) {
   return workbook;
 }
 
-// バッチ処理API
+// バッチ処理API（Vercel対応）
 app.post('/api/batch-process', async (req, res) => {
   try {
-    const uploadDir = path.join(__dirname, 'uploads');
-    const files = fs.readdirSync(uploadDir).filter(f => /\.(jpg|jpeg|png|gif)$/i.test(f));
-    if (files.length === 0) {
+    if (fileStorage.size === 0) {
       return res.status(400).json({ error: 'アップロード画像がありません' });
     }
+    
     const receiptData = [];
-    for (const file of files) {
+    for (const [fileId, fileData] of fileStorage.entries()) {
       try {
-        const ocrResult = await processReceiptOCR(path.join(uploadDir, file));
+        const ocrResult = await processReceiptOCR(fileData.buffer);
         receiptData.push(ocrResult);
       } catch (error) {
-        console.error(`OCR処理エラー (${file}):`, error);
+        console.error(`OCR処理エラー (${fileId}):`, error);
       }
     }
+    
     if (receiptData.length === 0) {
       return res.status(500).json({ error: '処理可能な領収書が見つかりませんでした' });
     }
+    
     const workbook = await generateExcelFile(receiptData);
     const today = new Date();
     const dateStr = today.getFullYear() + String(today.getMonth() + 1).padStart(2, '0') + String(today.getDate()).padStart(2, '0');
     const fileName = `${dateStr}領収書一括処理_v2.xlsx`;
-    const filePath = path.join(__dirname, 'downloads', fileName);
-    if (!fs.existsSync(path.join(__dirname, 'downloads'))) {
-      fs.mkdirSync(path.join(__dirname, 'downloads'));
-    }
-    await workbook.xlsx.writeFile(filePath);
+    
+    // メモリ内でExcelファイルを生成
+    const buffer = await workbook.xlsx.writeBuffer();
+    
     res.json({
       success: true,
       fileName: fileName,
-      downloadUrl: `/downloads/${fileName}`,
+      fileData: buffer.toString('base64'),
       processedCount: receiptData.length,
       totalAmount: receiptData.reduce((sum, receipt) => sum + receipt.amount, 0)
     });
   } catch (error) {
     console.error('バッチ処理エラー:', error);
-    res.status(500).json({ error: 'バッチ処理中にエラーが発生しました' });
+    res.status(500).json({ error: 'バッチ処理中にエラーが発生しました: ' + error.message });
   }
 });
 
@@ -911,33 +896,22 @@ app.get('/api/excel-preview', async (req, res) => {
   }
 });
 
-// ファイル削除API
+// ファイル削除API（Vercel対応）
 app.post('/api/delete-file', express.json(), (req, res) => {
-  const { name } = req.body;
-  if (!name) return res.status(400).json({ error: 'ファイル名が指定されていません' });
-  const uploadDir = 'uploads';
-  const files = fs.readdirSync(uploadDir);
-  // nameはdecode後の表示名なので、エンコード名を特定
-  const target = files.find(f => {
-    const parts = f.split('-');
-    const encoded = parts.slice(1).join('-');
-    try {
-      return decodeURIComponent(encoded) === name;
-    } catch {
-      return false;
-    }
-  });
-  if (!target) return res.status(404).json({ error: 'ファイルが見つかりません' });
-  fs.unlinkSync(path.join(uploadDir, target));
+  const { id } = req.body;
+  if (!id) return res.status(400).json({ error: 'ファイルIDが指定されていません' });
+  
+  if (!fileStorage.has(id)) {
+    return res.status(404).json({ error: 'ファイルが見つかりません' });
+  }
+  
+  fileStorage.delete(id);
   res.json({ success: true });
 });
 
-// 全クリアAPI
+// 全クリアAPI（Vercel対応）
 app.post('/api/clear-files', (req, res) => {
-  const uploadDir = 'uploads';
-  if (!fs.existsSync(uploadDir)) return res.json({ success: true });
-  const files = fs.readdirSync(uploadDir);
-  files.forEach(f => fs.unlinkSync(path.join(uploadDir, f)));
+  fileStorage.clear();
   res.json({ success: true });
 });
 

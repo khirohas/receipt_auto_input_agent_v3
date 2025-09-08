@@ -4,7 +4,8 @@ const cors = require('cors');
 const path = require('path');
 const fs = require('fs');
 const ExcelJS = require('exceljs');
-const OpenAI = require('openai');
+const LLMFactory = require('./services/llm/llm-factory');
+const { getConfigInfo } = require('./config/llm-config');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -24,14 +25,14 @@ app.use(express.static(path.join(__dirname, 'public')));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ limit: '10mb', extended: true }));
 
-// OpenAI設定
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY
-});
-
-// 環境変数チェック
-if (!process.env.OPENAI_API_KEY) {
-  console.error('OPENAI_API_KEY環境変数が設定されていません');
+// LLM設定とインスタンス初期化
+let llmService;
+try {
+  llmService = LLMFactory.createDefaultLLM();
+  console.log(`LLMサービス初期化完了: ${llmService.getProviderName()} (${llmService.getModelName()})`);
+} catch (error) {
+  console.error('LLMサービスの初期化に失敗しました:', error.message);
+  console.error('利用可能なプロバイダー:', LLMFactory.getAvailableProviders());
   process.exit(1);
 }
 
@@ -41,12 +42,45 @@ app.get('/', (req, res) => {
 });
 
 // ヘルスチェックエンドポイント
-app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'ok', 
-    timestamp: new Date().toISOString(),
-    environment: process.env.NODE_ENV || 'development'
-  });
+app.get('/health', async (req, res) => {
+  try {
+    const llmHealth = await llmService.healthCheck();
+    res.json({ 
+      status: 'ok', 
+      timestamp: new Date().toISOString(),
+      environment: process.env.NODE_ENV || 'development',
+      llm: {
+        provider: llmService.getProviderName(),
+        model: llmService.getModelName(),
+        healthy: llmHealth
+      }
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'error',
+      timestamp: new Date().toISOString(),
+      error: error.message
+    });
+  }
+});
+
+// LLM設定情報エンドポイント
+app.get('/api/llm-info', (req, res) => {
+  try {
+    const configInfo = getConfigInfo();
+    const providerInfo = LLMFactory.getAllProviderInfo();
+    res.json({
+      config: configInfo,
+      providers: providerInfo,
+      current: {
+        provider: llmService.getProviderName(),
+        model: llmService.getModelName(),
+        capabilities: llmService.getCapabilities()
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
 // 科目データ（構造化データ）
@@ -334,11 +368,9 @@ const ACCOUNT_MAPPING = {
   '交際費': '接待交際費'
 };
 
-// OCR処理関数（Vercel対応）
+// OCR処理関数（マルチLLM対応）
 async function processReceiptOCR(imageBuffer) {
   try {
-    const base64Image = imageBuffer.toString('base64');
-
     // 会計マスタデータから主要な科目・補助科目の例を抽出
     const master = ACCOUNT_DATA["勘定科目_補助科目_統合システム"];
     let accountExamples = [];
@@ -365,68 +397,81 @@ async function processReceiptOCR(imageBuffer) {
       }
     }
 
-    const response = await openai.chat.completions.create({
-      model: "gpt-4o",
-      messages: [
-        {
-          role: "system",
-          content: `あなたは領収書のOCR処理専門AIです。以下の情報を正確に抽出してください：\n\n【抽出対象】\n- 支払先（店名・会社名など）\n- 日付（yyyy/mm/dd形式に変換）\n- 小計（税抜金額、数値のみ）\n- 消費税（数値のみ、軽減税率がある場合は標準税率と軽減税率を分けて記載）\n- 軽減税率（軽減税率の消費税額、数値のみ、ない場合は0）\n- 合計金額（税込金額、数値のみ）\n- 品目詳細（具体的な商品名・サービス名と金額のリスト）\n- インボイス登録番号（Tの後に13数字からなる番号、見当たらない場合は「未記載」）\n- 支払い方法（現金・クレジットカード・電子マネーなど）\n- 領収書名義（記載があれば）\n- 備考（特記がある場合のみ）\n\n【品目リスト】\n${ITEM_CATEGORIES.join('／')}\n\n【会計科目判定の指針】\n品目名から適切な勘定科目・補助科目を判定してください。以下の例を参考にしてください：\n\n主要な科目・補助科目の例：\n${accountExamples.slice(0, 20).join('\\n')}\n\n具体的な判定例：\n- 絵本・おもちゃ → 原価消耗品費-保育材料費\n- 文房具・事務用品 → 消耗品費-事務用消耗品代\n- 切手・郵便料 → 通信費-切手代\n- 電話料・携帯電話料 → 支払電話料-電話料\n- 電車・バス・タクシー料金 → 旅費交通費-通勤定期代\n- ガソリン・駐車料金 → 車両費-ガソリン代\n- 電気代・水道代・ガス代 → 水道光熱費-電気代\n- 家賃・賃借料 → 地代家賃-支店事務所家賃\n- 手数料・振込手数料 → 支払手数料-振込手数料\n- 食材・食品 → 原価消耗品費-食材仕入\n- 清掃用品 → 原価消耗品費-介護業務用消耗品代\n- 医療用品 → 原価消耗品費-医事業務用消耗品代\n\n【出力形式】\nJSON形式で以下の構造で返してください：\n{\n  "payee": "支払先名",\n  "date": "yyyy/mm/dd",\n  "subtotal": 小計（数値）,\n  "tax": 消費税（数値）,\n  "reduced_tax": 軽減税率（数値、ない場合は0）,\n  "amount": 合計金額（数値）,\n  "items": [\n    {\n      "name": "商品名・サービス名",\n      "amount": 金額（数値）,\n      "category": "品目（品目リストから選択）"\n    }\n  ],\n  "invoice_number": "インボイス登録番号（空文字列可）",\n  "payment_method": "支払い方法（空文字列可）",\n  "receipt_name": "領収書名義（空文字列可）",\n  "remarks": "備考（空文字列可）"\n}\n\n注意：\n- 日付は必ずyyyy/mm/dd形式で、金額は数値のみで返してください。\n- 品目は品目リストから最も適切なものを選択してください。\n- 軽減税率がある場合は、標準税率と軽減税率を分けて記載してください。\n- 品目名は具体的で分かりやすい商品名・サービス名を記載してください。`
-        },
-        {
-          role: "user",
-          content: [
-            {
-              type: "text",
-              text: "この領収書画像から必要な情報を抽出してください。品目名は具体的に記載し、会計科目判定の指針に従って適切な品目カテゴリを選択してください。"
-            },
-            {
-              type: "image_url",
-              image_url: {
-                url: `data:image/jpeg;base64,${base64Image}`
-              }
-            }
-          ]
-        }
-      ],
-      max_tokens: 1500
-    });
+    const prompt = `あなたは領収書のOCR処理専門AIです。以下の情報を正確に抽出してください：
 
-    let content = response.choices[0].message.content.trim();
+【抽出対象】
+- 支払先（店名・会社名など）
+- 日付（yyyy/mm/dd形式に変換）
+- 小計（税抜金額、数値のみ）
+- 消費税（数値のみ、軽減税率がある場合は標準税率と軽減税率を分けて記載）
+- 軽減税率（軽減税率の消費税額、数値のみ、ない場合は0）
+- 合計金額（税込金額、数値のみ）
+- 品目詳細（具体的な商品名・サービス名と金額のリスト）
+- インボイス登録番号（Tの後に13数字からなる番号、見当たらない場合は「未記載」）
+- 支払い方法（現金・クレジットカード・電子マネーなど）
+- 領収書名義（記載があれば）
+- 備考（特記がある場合のみ）
+
+【品目リスト】
+${ITEM_CATEGORIES.join('／')}
+
+【会計科目判定の指針】
+品目名から適切な勘定科目・補助科目を判定してください。以下の例を参考にしてください：
+
+主要な科目・補助科目の例：
+${accountExamples.slice(0, 20).join('\\n')}
+
+具体的な判定例：
+- 絵本・おもちゃ → 原価消耗品費-保育材料費
+- 文房具・事務用品 → 消耗品費-事務用消耗品代
+- 切手・郵便料 → 通信費-切手代
+- 電話料・携帯電話料 → 支払電話料-電話料
+- 電車・バス・タクシー料金 → 旅費交通費-通勤定期代
+- ガソリン・駐車料金 → 車両費-ガソリン代
+- 電気代・水道代・ガス代 → 水道光熱費-電気代
+- 家賃・賃借料 → 地代家賃-支店事務所家賃
+- 手数料・振込手数料 → 支払手数料-振込手数料
+- 食材・食品 → 原価消耗品費-食材仕入
+- 清掃用品 → 原価消耗品費-介護業務用消耗品代
+- 医療用品 → 原価消耗品費-医事業務用消耗品代
+
+【出力形式】
+JSON形式で以下の構造で返してください：
+{
+  "payee": "支払先名",
+  "date": "yyyy/mm/dd",
+  "subtotal": 小計（数値）,
+  "tax": 消費税（数値）,
+  "reduced_tax": 軽減税率（数値、ない場合は0）,
+  "amount": 合計金額（数値）,
+  "items": [
+    {
+      "name": "商品名・サービス名",
+      "amount": 金額（数値）,
+      "category": "品目（品目リストから選択）"
+    }
+  ],
+  "invoice_number": "インボイス登録番号（空文字列可）",
+  "payment_method": "支払い方法（空文字列可）",
+  "receipt_name": "領収書名義（空文字列可）",
+  "remarks": "備考（空文字列可）"
+}
+
+注意：
+- 日付は必ずyyyy/mm/dd形式で、金額は数値のみで返してください。
+- 品目は品目リストから最も適切なものを選択してください。
+- 軽減税率がある場合は、標準税率と軽減税率を分けて記載してください。
+- 品目名は具体的で分かりやすい商品名・サービス名を記載してください。`;
+
+    console.log(`[OCR] 処理開始 - プロバイダー: ${llmService.getProviderName()}, モデル: ${llmService.getModelName()}`);
     
-    // コードブロックを除去
-    if (content.startsWith('```json')) {
-      content = content.replace(/^```json\s*/, '');
-    }
-    if (content.startsWith('```')) {
-      content = content.replace(/^```\s*/, '');
-    }
-    if (content.endsWith('```')) {
-      content = content.replace(/\s*```$/, '');
-    }
+    // 新しいLLMアーキテクチャを使用
+    const result = await llmService.processImage(imageBuffer, prompt);
     
-    // JSONパース前に内容をチェック
-    console.log('OpenAI応答内容:', content.substring(0, 200) + '...');
-    
-    try {
-      return JSON.parse(content);
-    } catch (parseError) {
-      console.error('JSONパースエラー:', parseError);
-      console.error('パースしようとした内容:', content);
-      
-      // エラーメッセージが含まれている場合の処理
-      if (content.includes('申し訳ありませんが') || content.includes('申し訳ございません')) {
-        throw new Error('画像が不鮮明または読み取れませんでした。より鮮明な画像をアップロードしてください。');
-      }
-      
-      // その他のエラーメッセージ
-      if (content.includes('エラー') || content.includes('error')) {
-        throw new Error('画像処理中にエラーが発生しました: ' + content.substring(0, 100));
-      }
-      
-      throw new Error('画像から情報を抽出できませんでした。領収書が鮮明に写っているか確認してください。');
-    }
+    console.log(`[OCR] 処理完了 - プロバイダー: ${llmService.getProviderName()}`);
+    return result;
   } catch (error) {
-    console.error('OCR処理エラー:', error);
+    console.error('[OCR] 処理エラー:', error);
     throw error;
   }
 }
@@ -960,6 +1005,46 @@ app.post('/api/delete-file', express.json(), (req, res) => {
 app.post('/api/clear-files', (req, res) => {
   fileStorage.clear();
   res.json({ success: true });
+});
+
+// LLMプロバイダー切り替えAPI
+app.post('/api/switch-llm', async (req, res) => {
+  try {
+    const { provider } = req.body;
+    
+    if (!provider) {
+      return res.status(400).json({ error: 'プロバイダー名が必要です' });
+    }
+    
+    // 新しいLLMサービスを作成
+    const newLLMService = LLMFactory.createLLM(provider);
+    
+    // ヘルスチェック
+    const isHealthy = await newLLMService.healthCheck();
+    if (!isHealthy) {
+      return res.status(400).json({ 
+        error: `${provider}サービスが利用できません`,
+        provider: provider
+      });
+    }
+    
+    // サービスを切り替え
+    llmService = newLLMService;
+    
+    console.log(`[LLM] プロバイダー切り替え完了: ${llmService.getProviderName()} (${llmService.getModelName()})`);
+    
+    res.json({
+      success: true,
+      provider: llmService.getProviderName(),
+      model: llmService.getModelName(),
+      capabilities: llmService.getCapabilities()
+    });
+  } catch (error) {
+    console.error('[LLM] プロバイダー切り替えエラー:', error);
+    res.status(500).json({ 
+      error: 'プロバイダー切り替えに失敗しました: ' + error.message 
+    });
+  }
 });
 
 // ダウンロード用

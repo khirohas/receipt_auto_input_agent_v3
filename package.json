@@ -8,6 +8,7 @@
     "dev": "nodemon server.js"
   },
   "dependencies": {
+    "@google/generative-ai": "^0.24.1",
     "cors": "^2.8.5",
     "dotenv": "^17.0.1",
     "exceljs": "^4.4.0",
@@ -30,4 +31,4 @@
   ],
   "author": "Receipt Auto Input Agent v2",
   "license": "MIT"
-} 
+}

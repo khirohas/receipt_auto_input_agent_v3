@@ -70,18 +70,40 @@ window.addEventListener('DOMContentLoaded', () => {
 
     function handleFiles(fileList) {
         const files = Array.from(fileList).filter(f => f.type.startsWith('image/'));
-        if (files.length === 0) return;
+        if (files.length === 0) {
+            alert('画像ファイルを選択してください');
+            return;
+        }
+        
+        // アップロード中表示
+        const uploadArea = document.querySelector('.file-upload-area');
+        const originalText = uploadArea.querySelector('p').textContent;
+        uploadArea.querySelector('p').textContent = `アップロード中... (${files.length}ファイル)`;
+        
         // 1ファイルずつアップロード
-        Promise.all(files.map(uploadFile)).then(fetchFileList);
+        Promise.all(files.map(uploadFile))
+            .then(() => {
+                uploadArea.querySelector('p').textContent = originalText;
+                fetchFileList();
+            })
+            .catch(err => {
+                uploadArea.querySelector('p').textContent = originalText;
+                alert('アップロードに失敗しました: ' + err.message);
+            });
     }
 
     async function uploadFile(file) {
         const formData = new FormData();
         formData.append('file', file);
-        await fetch('/api/upload', {
+        const res = await fetch('/api/upload', {
             method: 'POST',
             body: formData
         });
+        if (!res.ok) {
+            const error = await res.json();
+            throw new Error(error.error || 'アップロードに失敗しました');
+        }
+        return res.json();
     }
 
     async function fetchFileList() {
@@ -98,20 +120,29 @@ window.addEventListener('DOMContentLoaded', () => {
                 <td>${f.name}</td>
                 <td>${formatDate(f.date)}</td>
                 <td>${formatFileSize(f.size)}</td>
-                <td><button class="delete-btn" data-name="${encodeURIComponent(f.name)}">削除</button></td>
+                <td><button class="delete-btn" data-id="${f.id}">削除</button></td>
             `;
             fileListBody.appendChild(tr);
         });
         // 削除ボタンイベント
         document.querySelectorAll('.delete-btn').forEach(btn => {
             btn.onclick = async (e) => {
-                const name = decodeURIComponent(btn.getAttribute('data-name'));
-                await fetch('/api/delete-file', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ name })
-                });
-                fetchFileList();
+                const id = btn.getAttribute('data-id');
+                try {
+                    const res = await fetch('/api/delete-file', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ id })
+                    });
+                    if (res.ok) {
+                        fetchFileList();
+                    } else {
+                        const error = await res.json();
+                        alert('削除に失敗しました: ' + error.error);
+                    }
+                } catch (err) {
+                    alert('削除に失敗しました: ' + err.message);
+                }
             };
         });
     }
@@ -133,18 +164,24 @@ window.addEventListener('DOMContentLoaded', () => {
             const res = await fetch('/api/batch-process', { method: 'POST' });
             const result = await res.json();
             if (result.success) {
-                // ExcelプレビューAPI呼び出し
-                const previewRes = await fetch(`/api/excel-preview?file=${encodeURIComponent(result.fileName)}`);
-                const previewJson = await previewRes.json();
-                if (previewJson.rows && previewJson.rows.length > 0) {
-                    excelPreview.innerHTML = renderExcelTable(previewJson.rows, result.downloadUrl);
+                // メモリベースのExcelファイルをダウンロード
+                if (result.fileData) {
+                    const blob = new Blob([Uint8Array.from(atob(result.fileData), c => c.charCodeAt(0))], {
+                        type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+                    });
+                    const url = URL.createObjectURL(blob);
+                    excelPreview.innerHTML = `
+                        <div style="margin-bottom: 12px;">
+                            <a href="${url}" class="upload-option-btn" download="${result.fileName}">📄 Excelダウンロード</a>
+                            <p style="margin: 8px 0; color: #666;">処理件数: ${result.processedCount}件 | 合計金額: ¥${result.totalAmount.toLocaleString()}</p>
+                        </div>
+                        <div style="color: #1fa7a2;">Excelファイルが生成されました。上記リンクからダウンロードしてください。</div>
+                    `;
                 } else {
-                    excelPreview.innerHTML = '<div style="color:#1fa7a2;">Excelプレビューなし</div>';
+                    excelPreview.innerHTML = '<div style="color:#1fa7a2;">Excelファイルが生成されました</div>';
                 }
                 // ファイルリストもリフレッシュ
                 fetchFileList();
-                // Excelファイル名をlocalStorageに保存
-                localStorage.setItem('lastExcelFile', result.fileName);
             } else {
                 excelPreview.innerHTML = `<div style='color:#d00;'>${result.error || 'バッチ処理に失敗しました'}</div>`;
             }

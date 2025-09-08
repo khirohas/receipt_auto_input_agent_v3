@@ -17,11 +17,8 @@ app.use(cors({
   credentials: true
 }));
 
-// 静的ファイルの配信
-app.use(express.static('public', {
-  maxAge: '1d',
-  etag: true
-}));
+// 静的ファイルの配信（ルートパスより前に配置）
+app.use(express.static(path.join(__dirname, 'public')));
 
 // リクエストサイズ制限を設定（Vercel制限内）
 app.use(express.json({ limit: '10mb' }));

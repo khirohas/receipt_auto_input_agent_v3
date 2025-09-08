@@ -1,0 +1,965 @@
+const express = require('express');
+const multer = require('multer');
+const cors = require('cors');
+const path = require('path');
+const fs = require('fs');
+const ExcelJS = require('exceljs');
+const OpenAI = require('openai');
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+// CORS設定を本番環境に最適化
+app.use(cors({
+  origin: process.env.NODE_ENV === 'production' 
+    ? ['https://*.vercel.app', 'https://receipt-auto-input-agent.vercel.app'] 
+    : true,
+  credentials: true
+}));
+
+// 静的ファイルの配信
+app.use(express.static('public'));
+
+// リクエストサイズ制限を設定（Vercel制限内）
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ limit: '10mb', extended: true }));
+
+// OpenAI設定
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY
+});
+
+// 環境変数チェック
+if (!process.env.OPENAI_API_KEY) {
+  console.error('OPENAI_API_KEY環境変数が設定されていません');
+  process.exit(1);
+}
+
+// ヘルスチェックエンドポイント
+app.get('/health', (req, res) => {
+  res.json({ 
+    status: 'ok', 
+    timestamp: new Date().toISOString(),
+    environment: process.env.NODE_ENV || 'development'
+  });
+});
+
+// 科目データ（構造化データ）
+const ACCOUNT_DATA = JSON.parse(
+  fs.readFileSync(path.join(__dirname, 'data', 'accounting_master.json'), 'utf8')
+);
+
+// 科目データから科目コードと名称を取得する関数
+function getAccountInfo(itemName) {
+  // 品目名から適切な科目を判定するロジック
+  const itemNameLower = itemName.toLowerCase();
+  const master = ACCOUNT_DATA["勘定科目_補助科目_統合システム"];
+
+  // 1. マスタデータからキーワード一致で探す（補助科目名優先→科目名）
+  for (const sectionKey of ["資産の部", "損益の部"]) {
+    const section = master[sectionKey];
+    if (!section) continue;
+    for (const groupKey in section) {
+      const group = section[groupKey];
+      for (const mainKey in group) {
+        const main = group[mainKey];
+        for (const accountKey in main) {
+          const account = main[accountKey];
+          // 勘定科目名一致
+          if (account["勘定科目名"] && itemNameLower.includes(account["勘定科目名"].toLowerCase())) {
+            // 補助科目があれば最初を返す
+            if (account["補助科目"] && account["補助科目"].length > 0) {
+              return {
+                accountCode: account["勘定科目コード"] || accountKey.split("_")[0],
+                accountName: account["勘定科目名"],
+                subAccountCode: account["補助科目"][0].code,
+                subAccountName: account["補助科目"][0].name
+              };
+            } else {
+              return {
+                accountCode: account["勘定科目コード"] || accountKey.split("_")[0],
+                accountName: account["勘定科目名"],
+                subAccountCode: '',
+                subAccountName: ''
+              };
+            }
+          }
+          // 補助科目名一致
+          if (account["補助科目"]) {
+            for (const sub of account["補助科目"]) {
+              if (itemNameLower.includes(sub.name.toLowerCase())) {
+                return {
+                  accountCode: account["勘定科目コード"] || accountKey.split("_")[0],
+                  accountName: account["勘定科目名"],
+                  subAccountCode: sub.code,
+                  subAccountName: sub.name
+                };
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // 2. 詳細なキーワード判定（画像の品目に対応）
+  
+  // 絵本・おもちゃ・保育関連
+  if (itemNameLower.includes('絵本') || itemNameLower.includes('えほん') || 
+      itemNameLower.includes('おもちゃ') || itemNameLower.includes('チョッキ') ||
+      itemNameLower.includes('あおむし') || itemNameLower.includes('ほっとけーき') ||
+      itemNameLower.includes('てんぷら') || itemNameLower.includes('もこもこ') ||
+      itemNameLower.includes('保育') || itemNameLower.includes('子供') ||
+      itemNameLower.includes('児童') || itemNameLower.includes('幼児')) {
+    return {
+      accountCode: "72640",
+      accountName: "原価消耗品費",
+      subAccountCode: "0013",
+      subAccountName: "保育材料費"
+    };
+  }
+
+  // 食材・食品関連
+  if (itemNameLower.includes('鶏') || itemNameLower.includes('豚') || 
+      itemNameLower.includes('肉') || itemNameLower.includes('野菜') ||
+      itemNameLower.includes('玉ねぎ') || itemNameLower.includes('にんじん') ||
+      itemNameLower.includes('じゃがいも') || itemNameLower.includes('牛乳') ||
+      itemNameLower.includes('食パン') || itemNameLower.includes('卵') ||
+      itemNameLower.includes('バナナ') || itemNameLower.includes('せんべい') ||
+      itemNameLower.includes('ゼリー') || itemNameLower.includes('プリン') ||
+      itemNameLower.includes('麦茶') || itemNameLower.includes('食材') ||
+      itemNameLower.includes('食品') || itemNameLower.includes('冷凍')) {
+    return {
+      accountCode: "72120",
+      accountName: "一般商品仕入高",
+      subAccountCode: "0007",
+      subAccountName: "食材仕入"
+    };
+  }
+
+  // 写真・ビデオ撮影関連
+  if (itemNameLower.includes('写真') || itemNameLower.includes('ビデオ') || 
+      itemNameLower.includes('撮影') || itemNameLower.includes('編集') ||
+      itemNameLower.includes('フォト') || itemNameLower.includes('工房')) {
+    return {
+      accountCode: "74510",
+      accountName: "広告宣伝費",
+      subAccountCode: "0001",
+      subAccountName: "広告宣伝費"
+    };
+  }
+
+  // 交通費関連
+  if (itemNameLower.includes('交通費') || itemNameLower.includes('運搬') || 
+      itemNameLower.includes('機材') || itemNameLower.includes('移動')) {
+    return {
+      accountCode: "74530",
+      accountName: "旅費交通費",
+      subAccountCode: "0004",
+      subAccountName: "出張旅費"
+    };
+  }
+
+  // 3. 既存のキーワード判定（従来ロジック）
+  if (itemNameLower.includes('文房具') || itemNameLower.includes('ペン') || 
+      itemNameLower.includes('ノート') || itemNameLower.includes('紙') ||
+      itemNameLower.includes('クリップ') || itemNameLower.includes('ファイル') ||
+      itemNameLower.includes('名刺') || itemNameLower.includes('封筒') ||
+      itemNameLower.includes('コピー') || itemNameLower.includes('印刷') ||
+      itemNameLower.includes('写真') || itemNameLower.includes('フィルム') ||
+      itemNameLower.includes('清掃') || itemNameLower.includes('掃除')) {
+    return {
+      accountCode: "74610",
+      accountName: "消耗品費",
+      subAccountCode: "0001",
+      subAccountName: "事務用消耗品代"
+    };
+  }
+  if (itemNameLower.includes('切手') || itemNameLower.includes('はがき') || 
+      itemNameLower.includes('郵送') || itemNameLower.includes('郵便')) {
+    return {
+      accountCode: "74620",
+      accountName: "通信費",
+      subAccountCode: "0001",
+      subAccountName: "切手代"
+    };
+  }
+  if (itemNameLower.includes('電話') || itemNameLower.includes('ファックス') || 
+      itemNameLower.includes('携帯') || itemNameLower.includes('回線') ||
+      itemNameLower.includes('電報')) {
+    return {
+      accountCode: "74630",
+      accountName: "支払電話料",
+      subAccountCode: "0001",
+      subAccountName: "電話料"
+    };
+  }
+  if (itemNameLower.includes('電車') || itemNameLower.includes('バス') || 
+      itemNameLower.includes('タクシー') || itemNameLower.includes('定期') ||
+      itemNameLower.includes('航空券') || itemNameLower.includes('乗車券') ||
+      itemNameLower.includes('出張') || itemNameLower.includes('旅費')) {
+    return {
+      accountCode: "74530",
+      accountName: "旅費交通費",
+      subAccountCode: "0001",
+      subAccountName: "通勤定期代"
+    };
+  }
+  if (itemNameLower.includes('ガソリン') || itemNameLower.includes('有料道路') || 
+      itemNameLower.includes('駐車') || itemNameLower.includes('車検') ||
+      itemNameLower.includes('部品')) {
+    return {
+      accountCode: "74540",
+      accountName: "車両費",
+      subAccountCode: "0001",
+      subAccountName: "ガソリン代"
+    };
+  }
+  if (itemNameLower.includes('電気') || itemNameLower.includes('水道') || 
+      itemNameLower.includes('ガス') || itemNameLower.includes('光熱') ||
+      itemNameLower.includes('灯油') || itemNameLower.includes('燃料')) {
+    return {
+      accountCode: "74340",
+      accountName: "水道光熱費",
+      subAccountCode: "0002",
+      subAccountName: "電気代"
+    };
+  }
+  if (itemNameLower.includes('家賃') || itemNameLower.includes('賃借') || 
+      itemNameLower.includes('駐車場') || itemNameLower.includes('土地')) {
+    return {
+      accountCode: "74310",
+      accountName: "地代家賃",
+      subAccountCode: "0001",
+      subAccountName: "支店事務所家賃"
+    };
+  }
+  if (itemNameLower.includes('手数料') || itemNameLower.includes('振込') || 
+      itemNameLower.includes('報酬') || itemNameLower.includes('顧問') ||
+      itemNameLower.includes('監査') || itemNameLower.includes('委託')) {
+    return {
+      accountCode: "74590",
+      accountName: "支払手数料",
+      subAccountCode: "0001",
+      subAccountName: "振込手数料"
+    };
+  }
+  // デフォルト（消耗品費）
+  return {
+    accountCode: "74610",
+    accountName: "消耗品費",
+    subAccountCode: "0001",
+    subAccountName: "事務用消耗品代"
+  };
+}
+
+// ファイルアップロードAPI
+const uploadSingle = multer({
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => {
+      const uploadDir = 'uploads';
+      if (!fs.existsSync(uploadDir)) {
+        fs.mkdirSync(uploadDir);
+      }
+      cb(null, uploadDir);
+    },
+    filename: (req, file, cb) => {
+      console.log('originalname:', file.originalname);
+      // latin1→utf8変換＋URLエンコード
+      const original = Buffer.from(file.originalname, 'latin1').toString('utf8');
+      const encodedName = Date.now() + '-' + encodeURIComponent(original);
+      cb(null, encodedName);
+    }
+  }),
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype.startsWith('image/')) {
+      cb(null, true);
+    } else {
+      cb(new Error('画像ファイルのみアップロード可能です'));
+    }
+  }
+});
+
+app.post('/api/upload', uploadSingle.single('file'), (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({ error: 'ファイルがアップロードされていません' });
+  }
+  res.json({ success: true, file: req.file.filename });
+});
+
+// ファイルリスト取得API
+app.get('/api/files', (req, res) => {
+  const uploadDir = 'uploads';
+  if (!fs.existsSync(uploadDir)) {
+    return res.json([]);
+  }
+  const files = fs.readdirSync(uploadDir).map(name => {
+    const stat = fs.statSync(path.join(uploadDir, name));
+    // 拡張子前の部分だけdecode
+    const parts = name.split('-');
+    const encoded = parts.slice(1).join('-');
+    let decoded = '';
+    try {
+      decoded = decodeURIComponent(encoded);
+    } catch {
+      decoded = encoded;
+    }
+    return {
+      name: decoded,
+      size: stat.size,
+      date: stat.birthtime
+    };
+  });
+  res.json(files);
+});
+
+// 品目リスト
+const ITEM_CATEGORIES = [
+  '飲食費', '交通費', '宿泊費', '備品費', '通信費', 
+  '消耗品費', '印刷製本費', '会場費', '雑費', '交際費'
+];
+
+// 勘定科目マッピング
+const ACCOUNT_MAPPING = {
+  '飲食費': '接待交際費',
+  '交通費': '旅費交通費',
+  '宿泊費': '旅費交通費',
+  '備品費': '消耗品費',
+  '通信費': '通信費',
+  '消耗品費': '消耗品費',
+  '印刷製本費': '印刷製本費',
+  '会場費': '会議費',
+  '雑費': '雑費',
+  '交際費': '接待交際費'
+};
+
+// OCR処理関数
+async function processReceiptOCR(imagePath) {
+  try {
+    const imageBuffer = fs.readFileSync(imagePath);
+    const base64Image = imageBuffer.toString('base64');
+
+    // 会計マスタデータから主要な科目・補助科目の例を抽出
+    const master = ACCOUNT_DATA["勘定科目_補助科目_統合システム"];
+    let accountExamples = [];
+    
+    // 主要な科目と補助科目の例を収集
+    for (const sectionKey of ["資産の部", "損益の部"]) {
+      const section = master[sectionKey];
+      if (!section) continue;
+      for (const groupKey in section) {
+        const group = section[groupKey];
+        for (const mainKey in group) {
+          const main = group[mainKey];
+          for (const accountKey in main) {
+            const account = main[accountKey];
+            if (account["補助科目"] && account["補助科目"].length > 0) {
+              // 最初の3つの補助科目を例として追加
+              const examples = account["補助科目"].slice(0, 3).map(sub => 
+                `${sub.name} → ${account["勘定科目名"]}`
+              );
+              accountExamples.push(...examples);
+            }
+          }
+        }
+      }
+    }
+
+    const response = await openai.chat.completions.create({
+      model: "gpt-4o",
+      messages: [
+        {
+          role: "system",
+          content: `あなたは領収書のOCR処理専門AIです。以下の情報を正確に抽出してください：\n\n【抽出対象】\n- 支払先（店名・会社名など）\n- 日付（yyyy/mm/dd形式に変換）\n- 小計（税抜金額、数値のみ）\n- 消費税（数値のみ、軽減税率がある場合は標準税率と軽減税率を分けて記載）\n- 軽減税率（軽減税率の消費税額、数値のみ、ない場合は0）\n- 合計金額（税込金額、数値のみ）\n- 品目詳細（具体的な商品名・サービス名と金額のリスト）\n- インボイス登録番号（Tの後に13数字からなる番号、見当たらない場合は「未記載」）\n- 支払い方法（現金・クレジットカード・電子マネーなど）\n- 領収書名義（記載があれば）\n- 備考（特記がある場合のみ）\n\n【品目リスト】\n${ITEM_CATEGORIES.join('／')}\n\n【会計科目判定の指針】\n品目名から適切な勘定科目・補助科目を判定してください。以下の例を参考にしてください：\n\n主要な科目・補助科目の例：\n${accountExamples.slice(0, 20).join('\\n')}\n\n具体的な判定例：\n- 絵本・おもちゃ → 原価消耗品費-保育材料費\n- 文房具・事務用品 → 消耗品費-事務用消耗品代\n- 切手・郵便料 → 通信費-切手代\n- 電話料・携帯電話料 → 支払電話料-電話料\n- 電車・バス・タクシー料金 → 旅費交通費-通勤定期代\n- ガソリン・駐車料金 → 車両費-ガソリン代\n- 電気代・水道代・ガス代 → 水道光熱費-電気代\n- 家賃・賃借料 → 地代家賃-支店事務所家賃\n- 手数料・振込手数料 → 支払手数料-振込手数料\n- 食材・食品 → 原価消耗品費-食材仕入\n- 清掃用品 → 原価消耗品費-介護業務用消耗品代\n- 医療用品 → 原価消耗品費-医事業務用消耗品代\n\n【出力形式】\nJSON形式で以下の構造で返してください：\n{\n  "payee": "支払先名",\n  "date": "yyyy/mm/dd",\n  "subtotal": 小計（数値）,\n  "tax": 消費税（数値）,\n  "reduced_tax": 軽減税率（数値、ない場合は0）,\n  "amount": 合計金額（数値）,\n  "items": [\n    {\n      "name": "商品名・サービス名",\n      "amount": 金額（数値）,\n      "category": "品目（品目リストから選択）"\n    }\n  ],\n  "invoice_number": "インボイス登録番号（空文字列可）",\n  "payment_method": "支払い方法（空文字列可）",\n  "receipt_name": "領収書名義（空文字列可）",\n  "remarks": "備考（空文字列可）"\n}\n\n注意：\n- 日付は必ずyyyy/mm/dd形式で、金額は数値のみで返してください。\n- 品目は品目リストから最も適切なものを選択してください。\n- 軽減税率がある場合は、標準税率と軽減税率を分けて記載してください。\n- 品目名は具体的で分かりやすい商品名・サービス名を記載してください。`
+        },
+        {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text: "この領収書画像から必要な情報を抽出してください。品目名は具体的に記載し、会計科目判定の指針に従って適切な品目カテゴリを選択してください。"
+            },
+            {
+              type: "image_url",
+              image_url: {
+                url: `data:image/jpeg;base64,${base64Image}`
+              }
+            }
+          ]
+        }
+      ],
+      max_tokens: 1500
+    });
+
+    let content = response.choices[0].message.content.trim();
+    if (content.startsWith('```json')) {
+      content = content.replace(/^```json\s*/, '');
+    }
+    if (content.startsWith('```')) {
+      content = content.replace(/^```\s*/, '');
+    }
+    if (content.endsWith('```')) {
+      content = content.replace(/\s*```$/, '');
+    }
+    return JSON.parse(content);
+  } catch (error) {
+    console.error('OCR処理エラー:', error);
+    throw error;
+  }
+}
+
+// Excelファイル生成関数
+async function generateExcelFile(receiptData) {
+  const workbook = new ExcelJS.Workbook();
+  const worksheet = workbook.addWorksheet('領収書');
+  worksheet.columns = [
+    { header: '伝票識別ID', key: 'voucher_id', width: 15 },
+    { header: '明細番号', key: 'detail_no', width: 10 },
+    { header: '科目コード', key: 'account_code', width: 12 },
+    { header: '科目名称', key: 'account_name', width: 15 },
+    { header: '補助科目コード', key: 'sub_account_code', width: 15 },
+    { header: '補助科目名称', key: 'sub_account_name', width: 20 },
+    { header: '支払先', key: 'payee', width: 20 },
+    { header: '支払日', key: 'payment_date', width: 12 },
+    { header: '品目詳細', key: 'item_details', width: 25 },
+    { header: '金額', key: 'amount', width: 15 },
+    { header: 'インボイス登録番号', key: 'invoice_number', width: 20 }
+  ];
+  worksheet.getRow(1).font = { bold: true };
+  worksheet.getRow(1).fill = {
+    type: 'pattern',
+    pattern: 'solid',
+    fgColor: { argb: 'FFE0E0E0' }
+  };
+  
+  let rowNumber = 2;
+  let totalAmount = 0;
+  let detailNoCounter = 1; // 明細番号の連番カウンター
+  
+  receiptData.forEach((receipt, receiptIndex) => {
+    const receiptNo = receiptIndex + 1
+    
+    // 品目ごとの行を追加
+    if (receipt.items && receipt.items.length > 0) {
+      receipt.items.forEach((item, itemIndex) => {
+        // 科目情報を取得
+        const accountInfo = getAccountInfo(item.name);
+        
+        const row = worksheet.addRow({
+          voucher_id: itemIndex === 0 ? String(receiptNo).padStart(3, '0') : '', // 最初の品目のみ伝票識別IDを表示（Rなし）
+          detail_no: detailNoCounter++, // 明細番号（連番）
+          account_code: accountInfo.accountCode,
+          account_name: accountInfo.accountName,
+          sub_account_code: accountInfo.subAccountCode,
+          sub_account_name: accountInfo.subAccountName,
+          payee: itemIndex === 0 ? receipt.payee : '', // 最初の品目のみ支払先を表示
+          payment_date: itemIndex === 0 ? receipt.date : '', // 最初の品目のみ支払日を表示
+          item_details: item.name,
+          amount: item.amount,
+          invoice_number: itemIndex === 0 ? (receipt.invoice_number || '未記載') : '' // 最初の品目のみ表示
+        });
+        
+        // 行の背景色を設定
+        if (rowNumber % 2 === 0) {
+          row.fill = {
+            type: 'pattern',
+            pattern: 'solid',
+            fgColor: { argb: 'FFF5F5F5' }
+          };
+        } else {
+          row.fill = {
+            type: 'pattern',
+            pattern: 'solid',
+            fgColor: { argb: 'FFE0E0E0' }
+          };
+        }
+        
+        row.getCell(10).numFmt = '¥#,##0';
+        row.getCell(10).alignment = { horizontal: 'right' };
+        // ¥マークを確実に表示するため、文字列として設定
+        row.getCell(10).value = `¥${item.amount.toLocaleString()}`;
+        rowNumber++;
+      });
+      
+      // 品目エントリーが終わったら小計行を追加
+      const subtotalRow = worksheet.addRow({
+        voucher_id: '',
+        detail_no: '',
+        account_code: '',
+        account_name: '',
+        sub_account_code: '',
+        sub_account_name: '',
+        payee: '',
+        payment_date: '',
+        item_details: '小計',
+        amount: receipt.subtotal || receipt.amount,
+        invoice_number: ''
+      });
+      
+      // 小計行の背景色を設定（薄い青色）
+      subtotalRow.fill = {
+        type: 'pattern',
+        pattern: 'solid',
+        fgColor: { argb: 'FFE6F3FF' }
+      };
+      
+      subtotalRow.getCell('amount').numFmt = '¥#,##0';
+      subtotalRow.getCell('amount').font = { bold: true };
+      subtotalRow.getCell('item_details').font = { bold: true };
+      subtotalRow.getCell('amount').alignment = { horizontal: 'right' };
+      // ¥マークを確実に表示するため、文字列として設定
+      subtotalRow.getCell('amount').value = `¥${(receipt.subtotal || receipt.amount).toLocaleString()}`;
+      rowNumber++;
+      
+      // 消費税行を追加
+      if (receipt.tax && receipt.tax > 0) {
+        // 軽減税率がある場合は二行に分けて表示
+        if (receipt.reduced_tax && receipt.reduced_tax > 0) {
+          // 標準税率の消費税
+          const standardTaxRow = worksheet.addRow({
+            voucher_id: '',
+            detail_no: '',
+            account_code: '',
+            account_name: '',
+            sub_account_code: '',
+            sub_account_name: '',
+            payee: '',
+            payment_date: '',
+            item_details: '消費税（標準税率）',
+            amount: receipt.tax - receipt.reduced_tax,
+            invoice_number: ''
+          });
+          standardTaxRow.fill = {
+            type: 'pattern',
+            pattern: 'solid',
+            fgColor: { argb: 'FFE6F3FF' }
+          };
+          standardTaxRow.getCell('amount').numFmt = '¥#,##0';
+          standardTaxRow.getCell('amount').font = { bold: true };
+          standardTaxRow.getCell('item_details').font = { bold: true };
+          standardTaxRow.getCell('amount').alignment = { horizontal: 'right' };
+          // ¥マークを確実に表示するため、文字列として設定
+          standardTaxRow.getCell('amount').value = `¥${(receipt.tax - receipt.reduced_tax).toLocaleString()}`;
+          rowNumber++;
+          
+          // 軽減税率の消費税
+          const reducedTaxRow = worksheet.addRow({
+            voucher_id: '',
+            detail_no: '',
+            account_code: '',
+            account_name: '',
+            sub_account_code: '',
+            sub_account_name: '',
+            payee: '',
+            payment_date: '',
+            item_details: '消費税（軽減税率）',
+            amount: receipt.reduced_tax,
+            invoice_number: ''
+          });
+          reducedTaxRow.fill = {
+            type: 'pattern',
+            pattern: 'solid',
+            fgColor: { argb: 'FFE6F3FF' }
+          };
+          reducedTaxRow.getCell('amount').numFmt = '¥#,##0';
+          reducedTaxRow.getCell('amount').font = { bold: true };
+          reducedTaxRow.getCell('item_details').font = { bold: true };
+          reducedTaxRow.getCell('amount').alignment = { horizontal: 'right' };
+          // ¥マークを確実に表示するため、文字列として設定
+          reducedTaxRow.getCell('amount').value = `¥${receipt.reduced_tax.toLocaleString()}`;
+          rowNumber++;
+        } else {
+          // 通常の消費税
+          const taxRow = worksheet.addRow({
+            voucher_id: '',
+            detail_no: '',
+            account_code: '',
+            account_name: '',
+            sub_account_code: '',
+            sub_account_name: '',
+            payee: '',
+            payment_date: '',
+            item_details: '消費税',
+            amount: receipt.tax,
+            invoice_number: ''
+          });
+          taxRow.fill = {
+            type: 'pattern',
+            pattern: 'solid',
+            fgColor: { argb: 'FFE6F3FF' }
+          };
+          taxRow.getCell('amount').numFmt = '¥#,##0';
+          taxRow.getCell('amount').font = { bold: true };
+          taxRow.getCell('item_details').font = { bold: true };
+          taxRow.getCell('amount').alignment = { horizontal: 'right' };
+          // ¥マークを確実に表示するため、文字列として設定
+          taxRow.getCell('amount').value = `¥${receipt.tax.toLocaleString()}`;
+          rowNumber++;
+        }
+      }
+      
+      // 合計金額（税込）行を追加
+      const totalRow = worksheet.addRow({
+        voucher_id: '',
+        detail_no: '',
+        account_code: '',
+        account_name: '',
+        sub_account_code: '',
+        sub_account_name: '',
+        payee: '',
+        payment_date: '',
+        item_details: '合計金額（税込）',
+        amount: receipt.amount,
+        invoice_number: ''
+      });
+      
+      totalRow.fill = {
+        type: 'pattern',
+        pattern: 'solid',
+        fgColor: { argb: 'FFCCE5FF' }
+      };
+      totalRow.getCell('amount').numFmt = '¥#,##0';
+      totalRow.getCell('amount').font = { bold: true };
+      totalRow.getCell('item_details').font = { bold: true };
+      totalRow.getCell('amount').alignment = { horizontal: 'right' };
+      // ¥マークを確実に表示するため、文字列として設定
+      totalRow.getCell('amount').value = `¥${receipt.amount.toLocaleString()}`;
+      rowNumber++;
+      
+    } else {
+      // itemsがない場合は従来の形式で表示
+      const accountInfo = getAccountInfo(receipt.item_details || '');
+      const row = worksheet.addRow({
+        voucher_id: String(receiptNo).padStart(3, '0'),
+        detail_no: detailNoCounter++,
+        account_code: accountInfo.accountCode,
+        account_name: accountInfo.accountName,
+        sub_account_code: accountInfo.subAccountCode,
+        sub_account_name: accountInfo.subAccountName,
+        payee: receipt.payee,
+        payment_date: receipt.date,
+        item_details: receipt.item_details || '',
+        amount: receipt.amount,
+        invoice_number: receipt.invoice_number || '未記載'
+      });
+      
+      if (rowNumber % 2 === 0) {
+        row.fill = {
+          type: 'pattern',
+          pattern: 'solid',
+          fgColor: { argb: 'FFF5F5F5' }
+        };
+      } else {
+        row.fill = {
+          type: 'pattern',
+          pattern: 'solid',
+          fgColor: { argb: 'FFE0E0E0' }
+        };
+      }
+      
+      row.getCell('amount').numFmt = '¥#,##0';
+      row.getCell('amount').alignment = { horizontal: 'right' };
+      rowNumber++;
+      
+      // 従来形式でも小計行を追加
+      const subtotalRow = worksheet.addRow({
+        voucher_id: '',
+        detail_no: '',
+        account_code: '',
+        account_name: '',
+        sub_account_code: '',
+        sub_account_name: '',
+        payee: '',
+        payment_date: '',
+        item_details: '小計',
+        amount: receipt.subtotal || receipt.amount,
+        invoice_number: ''
+      });
+      
+      subtotalRow.fill = {
+        type: 'pattern',
+        pattern: 'solid',
+        fgColor: { argb: 'FFE6F3FF' }
+      };
+      
+      subtotalRow.getCell('amount').numFmt = '¥#,##0';
+      subtotalRow.getCell('amount').font = { bold: true };
+      subtotalRow.getCell('item_details').font = { bold: true };
+      subtotalRow.getCell('amount').alignment = { horizontal: 'right' };
+      // ¥マークを確実に表示するため、文字列として設定
+      subtotalRow.getCell('amount').value = `¥${(receipt.subtotal || receipt.amount).toLocaleString()}`;
+      rowNumber++;
+      
+      // 消費税行を追加
+      if (receipt.tax && receipt.tax > 0) {
+        // 軽減税率がある場合は二行に分けて表示
+        if (receipt.reduced_tax && receipt.reduced_tax > 0) {
+          // 標準税率の消費税
+          const standardTaxRow = worksheet.addRow({
+            voucher_id: '',
+            detail_no: '',
+            account_code: '',
+            account_name: '',
+            sub_account_code: '',
+            sub_account_name: '',
+            payee: '',
+            payment_date: '',
+            item_details: '消費税（標準税率）',
+            amount: receipt.tax - receipt.reduced_tax,
+            invoice_number: ''
+          });
+          standardTaxRow.fill = {
+            type: 'pattern',
+            pattern: 'solid',
+            fgColor: { argb: 'FFE6F3FF' }
+          };
+          standardTaxRow.getCell('amount').numFmt = '¥#,##0';
+          standardTaxRow.getCell('amount').font = { bold: true };
+          standardTaxRow.getCell('item_details').font = { bold: true };
+          standardTaxRow.getCell('amount').alignment = { horizontal: 'right' };
+          // ¥マークを確実に表示するため、文字列として設定
+          standardTaxRow.getCell('amount').value = `¥${(receipt.tax - receipt.reduced_tax).toLocaleString()}`;
+          rowNumber++;
+          
+          // 軽減税率の消費税
+          const reducedTaxRow = worksheet.addRow({
+            voucher_id: '',
+            detail_no: '',
+            account_code: '',
+            account_name: '',
+            sub_account_code: '',
+            sub_account_name: '',
+            payee: '',
+            payment_date: '',
+            item_details: '消費税（軽減税率）',
+            amount: receipt.reduced_tax,
+            invoice_number: ''
+          });
+          reducedTaxRow.fill = {
+            type: 'pattern',
+            pattern: 'solid',
+            fgColor: { argb: 'FFE6F3FF' }
+          };
+          reducedTaxRow.getCell('amount').numFmt = '¥#,##0';
+          reducedTaxRow.getCell('amount').font = { bold: true };
+          reducedTaxRow.getCell('item_details').font = { bold: true };
+          reducedTaxRow.getCell('amount').alignment = { horizontal: 'right' };
+          // ¥マークを確実に表示するため、文字列として設定
+          reducedTaxRow.getCell('amount').value = `¥${receipt.reduced_tax.toLocaleString()}`;
+          rowNumber++;
+        } else {
+          // 通常の消費税
+          const taxRow = worksheet.addRow({
+            voucher_id: '',
+            detail_no: '',
+            account_code: '',
+            account_name: '',
+            sub_account_code: '',
+            sub_account_name: '',
+            payee: '',
+            payment_date: '',
+            item_details: '消費税',
+            amount: receipt.tax,
+            invoice_number: ''
+          });
+          taxRow.fill = {
+            type: 'pattern',
+            pattern: 'solid',
+            fgColor: { argb: 'FFE6F3FF' }
+          };
+          taxRow.getCell('amount').numFmt = '¥#,##0';
+          taxRow.getCell('amount').font = { bold: true };
+          taxRow.getCell('item_details').font = { bold: true };
+          taxRow.getCell('amount').alignment = { horizontal: 'right' };
+          // ¥マークを確実に表示するため、文字列として設定
+          taxRow.getCell('amount').value = `¥${receipt.tax.toLocaleString()}`;
+          rowNumber++;
+        }
+      }
+      
+      // 合計金額（税込）行を追加
+      const totalRow = worksheet.addRow({
+        voucher_id: '',
+        detail_no: '',
+        account_code: '',
+        account_name: '',
+        sub_account_code: '',
+        sub_account_name: '',
+        payee: '',
+        payment_date: '',
+        item_details: '合計金額（税込）',
+        amount: receipt.amount,
+        invoice_number: ''
+      });
+      
+      totalRow.fill = {
+        type: 'pattern',
+        pattern: 'solid',
+        fgColor: { argb: 'FFCCE5FF' }
+      };
+      totalRow.getCell('amount').numFmt = '¥#,##0';
+      totalRow.getCell('amount').font = { bold: true };
+      totalRow.getCell('item_details').font = { bold: true };
+      totalRow.getCell('amount').alignment = { horizontal: 'right' };
+      // ¥マークを確実に表示するため、文字列として設定
+      totalRow.getCell('amount').value = `¥${receipt.amount.toLocaleString()}`;
+      rowNumber++;
+    }
+    
+    totalAmount += receipt.amount;
+  });
+  
+  // 全体の合計行を追加
+  const totalRow = worksheet.addRow({
+    voucher_id: '',
+    detail_no: '',
+    account_code: '',
+    account_name: '',
+    sub_account_code: '',
+    sub_account_name: '',
+    payee: '',
+    payment_date: '全体合計',
+    item_details: '',
+    amount: totalAmount,
+    invoice_number: ''
+  });
+  
+  totalRow.getCell(8).font = { bold: true }; // payment_date列
+  totalRow.getCell(10).font = { bold: true }; // amount列
+  totalRow.getCell(10).numFmt = '¥#,##0';
+  totalRow.getCell(10).alignment = { horizontal: 'right' };
+  
+  // 全体合計行の背景色を設定（濃い青色）
+  totalRow.fill = {
+    type: 'pattern',
+    pattern: 'solid',
+    fgColor: { argb: 'FFCCE5FF' }
+  };
+  
+  return workbook;
+}
+
+// バッチ処理API
+app.post('/api/batch-process', async (req, res) => {
+  try {
+    const uploadDir = path.join(__dirname, 'uploads');
+    const files = fs.readdirSync(uploadDir).filter(f => /\.(jpg|jpeg|png|gif)$/i.test(f));
+    if (files.length === 0) {
+      return res.status(400).json({ error: 'アップロード画像がありません' });
+    }
+    const receiptData = [];
+    for (const file of files) {
+      try {
+        const ocrResult = await processReceiptOCR(path.join(uploadDir, file));
+        receiptData.push(ocrResult);
+      } catch (error) {
+        console.error(`OCR処理エラー (${file}):`, error);
+      }
+    }
+    if (receiptData.length === 0) {
+      return res.status(500).json({ error: '処理可能な領収書が見つかりませんでした' });
+    }
+    const workbook = await generateExcelFile(receiptData);
+    const today = new Date();
+    const dateStr = today.getFullYear() + String(today.getMonth() + 1).padStart(2, '0') + String(today.getDate()).padStart(2, '0');
+    const fileName = `${dateStr}領収書一括処理_v2.xlsx`;
+    const filePath = path.join(__dirname, 'downloads', fileName);
+    if (!fs.existsSync(path.join(__dirname, 'downloads'))) {
+      fs.mkdirSync(path.join(__dirname, 'downloads'));
+    }
+    await workbook.xlsx.writeFile(filePath);
+    res.json({
+      success: true,
+      fileName: fileName,
+      downloadUrl: `/downloads/${fileName}`,
+      processedCount: receiptData.length,
+      totalAmount: receiptData.reduce((sum, receipt) => sum + receipt.amount, 0)
+    });
+  } catch (error) {
+    console.error('バッチ処理エラー:', error);
+    res.status(500).json({ error: 'バッチ処理中にエラーが発生しました' });
+  }
+});
+
+// ExcelプレビューAPI
+app.get('/api/excel-preview', async (req, res) => {
+  try {
+    const file = req.query.file;
+    if (!file) return res.status(400).json({ error: 'fileパラメータが必要です' });
+    const filePath = path.join(__dirname, 'downloads', file);
+    if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'ファイルが見つかりません' });
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.readFile(filePath);
+    const worksheet = workbook.worksheets[0];
+    const rows = [];
+    worksheet.eachRow((row, rowNumber) => {
+      // 1行目はヘッダー
+      if (rowNumber === 1) {
+        rows.push(row.values.slice(1)); // 0番目は空
+      } else {
+        rows.push(row.values.slice(1));
+      }
+    });
+    res.json({ rows });
+  } catch (err) {
+    res.status(500).json({ error: 'Excelプレビュー取得エラー', detail: err.message });
+  }
+});
+
+// ファイル削除API
+app.post('/api/delete-file', express.json(), (req, res) => {
+  const { name } = req.body;
+  if (!name) return res.status(400).json({ error: 'ファイル名が指定されていません' });
+  const uploadDir = 'uploads';
+  const files = fs.readdirSync(uploadDir);
+  // nameはdecode後の表示名なので、エンコード名を特定
+  const target = files.find(f => {
+    const parts = f.split('-');
+    const encoded = parts.slice(1).join('-');
+    try {
+      return decodeURIComponent(encoded) === name;
+    } catch {
+      return false;
+    }
+  });
+  if (!target) return res.status(404).json({ error: 'ファイルが見つかりません' });
+  fs.unlinkSync(path.join(uploadDir, target));
+  res.json({ success: true });
+});
+
+// 全クリアAPI
+app.post('/api/clear-files', (req, res) => {
+  const uploadDir = 'uploads';
+  if (!fs.existsSync(uploadDir)) return res.json({ success: true });
+  const files = fs.readdirSync(uploadDir);
+  files.forEach(f => fs.unlinkSync(path.join(uploadDir, f)));
+  res.json({ success: true });
+});
+
+// ダウンロード用
+app.use('/downloads', express.static(path.join(__dirname, 'downloads')));
+
+// グローバルエラーハンドラー
+app.use((err, req, res, next) => {
+  console.error('サーバーエラー:', err);
+  res.status(500).json({ 
+    error: 'サーバー内部エラーが発生しました',
+    message: process.env.NODE_ENV === 'development' ? err.message : 'Internal Server Error'
+  });
+});
+
+// 404ハンドラー
+app.use((req, res) => {
+  res.status(404).json({ error: 'エンドポイントが見つかりません' });
+});
+
+// Vercel用のエクスポート
+module.exports = app;
+
+// ローカル開発時のみサーバー起動
+if (process.env.NODE_ENV !== 'production' || process.env.VERCEL !== '1') {
+  app.listen(PORT, () => {
+    console.log(`サーバーが起動しました: http://localhost:${PORT}`);
+    console.log(`環境: ${process.env.NODE_ENV || 'development'}`);
+  });
+} 

@@ -1,0 +1,259 @@
+/* --- 追加・拡張CSS --- */
+
+.app-root {
+    display: flex;
+    min-height: 100vh;
+    width: 100vw;
+    background: #fafaf8;
+}
+
+.main-preview-wrapper {
+    display: flex;
+    flex: 1;
+    min-height: 100vh;
+    position: relative;
+}
+.main-area {
+    flex-basis: 0;
+    flex-grow: 1;
+    min-width: 50px;
+    transition: flex-basis 0.1s;
+    z-index: 1;
+}
+.splitter {
+    width: 7px;
+    background: linear-gradient(135deg, #e0e0e0 60%, #35d5d0 100%);
+    cursor: col-resize;
+    z-index: 2;
+    transition: background 0.2s;
+}
+.splitter:hover, .splitter.active {
+    background: linear-gradient(135deg, #1fa7a2 0%, #35d5d0 100%);
+}
+.preview-area {
+    width: 800px;
+    min-width: 50px;
+    max-width: none;
+    transition: width 0.1s;
+    z-index: 1;
+}
+
+.main-header {
+    padding: 36px 36px 12px 36px;
+    background: linear-gradient(135deg, #35d5d0 0%, #1fa7a2 100%);
+    color: white;
+    border-radius: 0 0 18px 0;
+    box-shadow: 0 2px 8px rgba(53, 213, 208, 0.04);
+    margin-bottom: 0;
+}
+
+.main-header h1 {
+    font-size: 1.6rem;
+    font-weight: 700;
+    margin-bottom: 8px;
+}
+
+.main-header p {
+    font-size: 1.1rem;
+    opacity: 0.95;
+}
+
+.main-content {
+    display: flex;
+    flex-direction: column;
+    gap: 24px;
+    padding: 32px 36px 32px 36px;
+}
+
+.file-upload-section {
+    margin-bottom: 12px;
+}
+
+.file-list-section {
+    background: #fff;
+    border-radius: 12px;
+    box-shadow: 0 2px 8px rgba(53, 213, 208, 0.06);
+    padding: 20px 24px;
+    margin-top: 0;
+}
+
+.file-list-section > div {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.file-list-section h2 {
+    font-size: 1.1rem;
+    margin: 0;
+    color: #1fa7a2;
+    line-height: 1.5;
+}
+
+/* ボタングループのスタイル */
+.button-group {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+}
+
+.file-list-table {
+    width: 100%;
+    border-collapse: collapse;
+    background: #fff;
+}
+.file-list-table th, .file-list-table td {
+    padding: 10px 12px;
+    border-bottom: 1px solid #e0e0e0;
+    text-align: left;
+    font-size: 1rem;
+}
+.file-list-table th {
+    background: #e0f7f7;
+    color: #1fa7a2;
+    font-weight: 700;
+}
+.file-list-table tr:last-child td {
+    border-bottom: none;
+}
+
+/* 右端プレビューエリア */
+.preview-header {
+    padding: 28px 24px 12px 24px;
+    color: #1fa7a2;
+    font-weight: bold;
+    font-size: 1.2rem;
+}
+.excel-preview {
+    flex: 1;
+    padding: 16px 24px;
+    background: #fff;
+    border-radius: 12px;
+    margin: 0 16px 16px 16px;
+    box-shadow: 0 2px 8px rgba(53, 213, 208, 0.06);
+    overflow-x: auto;
+}
+
+.excel-preview-table {
+    width: 100%;
+    min-width: 1200px;
+    border-collapse: collapse;
+    background: #fff;
+    margin-top: 8px;
+    font-size: 0.9rem;
+}
+.excel-preview-table th, .excel-preview-table td {
+    border: 1px solid #e0e0e0;
+    padding: 8px;
+    text-align: center;
+}
+
+/* 金額列のスタイル */
+.excel-preview-table td:nth-child(10) {
+    text-align: right;
+    border:1px solid #e0e0e0;
+}
+
+.bold-cell {
+    font-weight: bold !important;
+}
+
+/* 金額列のヘッダー */
+.excel-preview-table th:nth-child(10) {
+    background-color: #e9ecef;
+    border:2px solid #dee2e6;
+    font-weight: bold;
+}
+
+/* その他のヘッダー */
+.excel-preview-table th:not(:nth-child(10)) {
+    background: #e0f7f7;
+    color: #1fa7a2;
+    font-weight: 700;
+}
+
+.excel-status-bar {
+    width: 100%;
+    background: linear-gradient(90deg, #35d5d0 0%, #1fa7a2 100%);
+    color: #fff;
+    font-weight: bold;
+    text-align: center;
+    padding: 8px 0;
+    border-radius: 8px 8px 0 0;
+    margin-bottom: 8px;
+    position: relative;
+    overflow: hidden;
+}
+.excel-status-bar .bar {
+    position: absolute;
+    left: 0; top: 0; bottom: 0;
+    width: 0%;
+    background: rgba(255,255,255,0.3);
+    animation: status-bar-move 1.2s linear infinite;
+}
+@keyframes status-bar-move {
+    0% { width: 0%; left: 0; }
+    50% { width: 100%; left: 0; }
+    100% { width: 0%; left: 100%; }
+}
+
+.batch-btn, .delete-btn, .clear-btn {
+    padding: 4px 18px;
+    background: linear-gradient(135deg, #35d5d0 0%, #1fa7a2 100%);
+    color: #fff;
+    font-size: 1.1rem;
+    font-weight: bold;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: background 0.2s;
+    box-shadow: 0 2px 8px rgba(53, 213, 208, 0.08);
+    vertical-align: middle;
+    margin-bottom: 0;
+    line-height: 1.5;
+}
+.batch-btn:hover, .delete-btn:hover {
+    background: linear-gradient(135deg, #1fa7a2 0%, #35d5d0 100%);
+}
+
+.delete-btn {
+    font-size: 1rem;
+    box-shadow: none;
+}
+
+.batch-btn {
+    min-width: auto;
+}
+
+.clear-btn {
+    background: linear-gradient(135deg, #ff6b6b 0%, #ee5a52 100%);
+    box-shadow: 0 2px 8px rgba(255, 107, 107, 0.08);
+}
+
+.clear-btn:hover {
+    background: linear-gradient(135deg, #ee5a52 0%, #ff6b6b 100%);
+}
+
+.upload-option-btn {
+    background: linear-gradient(135deg, #35d5d0 0%, #1fa7a2 100%);
+    color: #fff;
+    font-size: 1.1rem;
+    font-weight: bold;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: background 0.2s;
+    box-shadow: 0 2px 8px rgba(53, 213, 208, 0.08);
+    padding: 10px 24px;
+    margin: 0 8px;
+}
+.upload-option-btn:hover {
+    background: linear-gradient(135deg, #1fa7a2 0%, #35d5d0 100%);
+}
+
+/* レスポンシブ調整（必要に応じて） */
+@media (max-width: 1200px) {
+    .preview-area {
+        display: none;
+    }
+} 

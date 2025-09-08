@@ -201,8 +201,13 @@ window.addEventListener('DOMContentLoaded', () => {
                     
                     let errorMessage = '';
                     if (result.errors && result.errors.length > 0) {
+                        const errorDetails = result.errors.map(err => 
+                            `• ${err.fileName || err.fileId}: ${err.error}`
+                        ).join('<br>');
+                        
                         errorMessage = `<div style="color: #ff6b6b; margin: 8px 0; font-size: 14px;">
-                            処理できなかったファイル: ${result.errors.length}件
+                            <strong>処理できなかったファイル: ${result.errors.length}件</strong><br>
+                            ${errorDetails}
                         </div>`;
                     }
                     

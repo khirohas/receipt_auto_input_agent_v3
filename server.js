@@ -392,6 +392,8 @@ async function processReceiptOCR(imageBuffer) {
     });
 
     let content = response.choices[0].message.content.trim();
+    
+    // コードブロックを除去
     if (content.startsWith('```json')) {
       content = content.replace(/^```json\s*/, '');
     }
@@ -401,7 +403,28 @@ async function processReceiptOCR(imageBuffer) {
     if (content.endsWith('```')) {
       content = content.replace(/\s*```$/, '');
     }
-    return JSON.parse(content);
+    
+    // JSONパース前に内容をチェック
+    console.log('OpenAI応答内容:', content.substring(0, 200) + '...');
+    
+    try {
+      return JSON.parse(content);
+    } catch (parseError) {
+      console.error('JSONパースエラー:', parseError);
+      console.error('パースしようとした内容:', content);
+      
+      // エラーメッセージが含まれている場合の処理
+      if (content.includes('申し訳ありませんが') || content.includes('申し訳ございません')) {
+        throw new Error('画像が不鮮明または読み取れませんでした。より鮮明な画像をアップロードしてください。');
+      }
+      
+      // その他のエラーメッセージ
+      if (content.includes('エラー') || content.includes('error')) {
+        throw new Error('画像処理中にエラーが発生しました: ' + content.substring(0, 100));
+      }
+      
+      throw new Error('画像から情報を抽出できませんでした。領収書が鮮明に写っているか確認してください。');
+    }
   } catch (error) {
     console.error('OCR処理エラー:', error);
     throw error;
@@ -853,13 +876,17 @@ app.post('/api/batch-process', async (req, res) => {
     
     for (const [fileId, fileData] of fileStorage.entries()) {
       try {
-        console.log(`OCR処理開始: ${fileId}`);
+        console.log(`OCR処理開始: ${fileId} - ${fileData.originalname}`);
         const ocrResult = await processReceiptOCR(fileData.buffer);
         console.log(`OCR処理完了: ${fileId}`, ocrResult);
         receiptData.push(ocrResult);
       } catch (error) {
-        console.error(`OCR処理エラー (${fileId}):`, error);
-        errors.push({ fileId, error: error.message });
+        console.error(`OCR処理エラー (${fileId} - ${fileData.originalname}):`, error);
+        errors.push({ 
+          fileId, 
+          fileName: fileData.originalname,
+          error: error.message 
+        });
       }
     }
     

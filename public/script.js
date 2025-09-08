@@ -75,21 +75,36 @@ window.addEventListener('DOMContentLoaded', () => {
             return;
         }
         
+        console.log('選択されたファイル数:', files.length);
+        
         // アップロード中表示
         const uploadArea = document.querySelector('.file-upload-area');
         const originalText = uploadArea.querySelector('p').textContent;
         uploadArea.querySelector('p').textContent = `アップロード中... (${files.length}ファイル)`;
         
-        // 1ファイルずつアップロード
-        Promise.all(files.map(uploadFile))
-            .then(() => {
-                uploadArea.querySelector('p').textContent = originalText;
-                fetchFileList();
-            })
-            .catch(err => {
-                uploadArea.querySelector('p').textContent = originalText;
-                alert('アップロードに失敗しました: ' + err.message);
-            });
+        // 1ファイルずつアップロード（並列処理を制限）
+        uploadFilesSequentially(files, 0, uploadArea, originalText);
+    }
+    
+    async function uploadFilesSequentially(files, index, uploadArea, originalText) {
+        if (index >= files.length) {
+            uploadArea.querySelector('p').textContent = originalText;
+            fetchFileList();
+            return;
+        }
+        
+        try {
+            console.log(`アップロード中: ${index + 1}/${files.length} - ${files[index].name}`);
+            await uploadFile(files[index]);
+            console.log(`アップロード完了: ${index + 1}/${files.length} - ${files[index].name}`);
+            
+            // 次のファイルをアップロード
+            uploadFilesSequentially(files, index + 1, uploadArea, originalText);
+        } catch (err) {
+            console.error(`アップロードエラー (${files[index].name}):`, err);
+            uploadArea.querySelector('p').textContent = originalText;
+            alert(`ファイル "${files[index].name}" のアップロードに失敗しました: ${err.message}`);
+        }
     }
 
     async function uploadFile(file) {
@@ -107,9 +122,14 @@ window.addEventListener('DOMContentLoaded', () => {
     }
 
     async function fetchFileList() {
-        const res = await fetch('/api/files');
-        const files = await res.json();
-        updateFileTable(files);
+        try {
+            const res = await fetch('/api/files');
+            const files = await res.json();
+            console.log('取得したファイル数:', files.length);
+            updateFileTable(files);
+        } catch (err) {
+            console.error('ファイルリスト取得エラー:', err);
+        }
     }
 
     function updateFileTable(files) {

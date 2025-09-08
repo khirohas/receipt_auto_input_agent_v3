@@ -274,23 +274,32 @@ const uploadSingle = multer({
 const fileStorage = new Map();
 
 app.post('/api/upload', uploadSingle.single('file'), (req, res) => {
-  if (!req.file) {
-    return res.status(400).json({ error: 'ファイルがアップロードされていません' });
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'ファイルがアップロードされていません' });
+    }
+    
+    const fileId = Date.now() + '-' + Math.random().toString(36).substr(2, 9);
+    const originalName = Buffer.from(req.file.originalname, 'latin1').toString('utf8');
+    
+    console.log(`ファイルアップロード: ${originalName} (${req.file.size} bytes)`);
+    
+    // メモリに保存
+    fileStorage.set(fileId, {
+      buffer: req.file.buffer,
+      originalname: originalName,
+      mimetype: req.file.mimetype,
+      size: req.file.size,
+      uploadTime: new Date()
+    });
+    
+    console.log(`ファイル保存完了: ${fileId} - 現在のファイル数: ${fileStorage.size}`);
+    
+    res.json({ success: true, file: fileId, originalName: originalName });
+  } catch (error) {
+    console.error('アップロード処理エラー:', error);
+    res.status(500).json({ error: 'アップロード処理中にエラーが発生しました: ' + error.message });
   }
-  
-  const fileId = Date.now() + '-' + Math.random().toString(36).substr(2, 9);
-  const originalName = Buffer.from(req.file.originalname, 'latin1').toString('utf8');
-  
-  // メモリに保存
-  fileStorage.set(fileId, {
-    buffer: req.file.buffer,
-    originalname: originalName,
-    mimetype: req.file.mimetype,
-    size: req.file.size,
-    uploadTime: new Date()
-  });
-  
-  res.json({ success: true, file: fileId, originalName: originalName });
 });
 
 // ファイルリスト取得API
@@ -301,6 +310,7 @@ app.get('/api/files', (req, res) => {
     size: fileData.size,
     date: fileData.uploadTime
   }));
+  console.log(`ファイルリスト取得: ${files.length}件`);
   res.json(files);
 });
 

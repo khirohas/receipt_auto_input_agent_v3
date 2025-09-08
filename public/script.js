@@ -162,7 +162,15 @@ window.addEventListener('DOMContentLoaded', () => {
         excelPreview.innerHTML = '<div class="excel-status-bar">処理中...<div class="bar"></div></div>';
         try {
             const res = await fetch('/api/batch-process', { method: 'POST' });
+            
+            if (!res.ok) {
+                const errorData = await res.json();
+                throw new Error(errorData.error || `HTTP ${res.status}`);
+            }
+            
             const result = await res.json();
+            console.log('バッチ処理結果:', result);
+            
             if (result.success) {
                 // メモリベースのExcelファイルをダウンロード
                 if (result.fileData) {
@@ -170,13 +178,52 @@ window.addEventListener('DOMContentLoaded', () => {
                         type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
                     });
                     const url = URL.createObjectURL(blob);
-                    excelPreview.innerHTML = `
-                        <div style="margin-bottom: 12px;">
-                            <a href="${url}" class="upload-option-btn" download="${result.fileName}">📄 Excelダウンロード</a>
-                            <p style="margin: 8px 0; color: #666;">処理件数: ${result.processedCount}件 | 合計金額: ¥${result.totalAmount.toLocaleString()}</p>
-                        </div>
-                        <div style="color: #1fa7a2;">Excelファイルが生成されました。上記リンクからダウンロードしてください。</div>
-                    `;
+                    
+                    let errorMessage = '';
+                    if (result.errors && result.errors.length > 0) {
+                        errorMessage = `<div style="color: #ff6b6b; margin: 8px 0; font-size: 14px;">
+                            処理できなかったファイル: ${result.errors.length}件
+                        </div>`;
+                    }
+                    
+                    // Excelプレビューを取得
+                    try {
+                        const previewRes = await fetch(`/api/excel-preview?file=${encodeURIComponent(result.fileData)}`);
+                        if (previewRes.ok) {
+                            const previewJson = await previewRes.json();
+                            if (previewJson.rows && previewJson.rows.length > 0) {
+                                excelPreview.innerHTML = `
+                                    <div style="margin-bottom: 12px;">
+                                        <a href="${url}" class="upload-option-btn" download="${result.fileName}">📄 Excelダウンロード</a>
+                                        <p style="margin: 8px 0; color: #666;">処理件数: ${result.processedCount}件 | 合計金額: ¥${result.totalAmount.toLocaleString()}</p>
+                                        ${errorMessage}
+                                    </div>
+                                    ${renderExcelTable(previewJson.rows, url)}
+                                `;
+                            } else {
+                                excelPreview.innerHTML = `
+                                    <div style="margin-bottom: 12px;">
+                                        <a href="${url}" class="upload-option-btn" download="${result.fileName}">📄 Excelダウンロード</a>
+                                        <p style="margin: 8px 0; color: #666;">処理件数: ${result.processedCount}件 | 合計金額: ¥${result.totalAmount.toLocaleString()}</p>
+                                        ${errorMessage}
+                                    </div>
+                                    <div style="color: #1fa7a2;">Excelファイルが生成されました。上記リンクからダウンロードしてください。</div>
+                                `;
+                            }
+                        } else {
+                            throw new Error('プレビュー取得に失敗');
+                        }
+                    } catch (previewErr) {
+                        console.error('プレビュー取得エラー:', previewErr);
+                        excelPreview.innerHTML = `
+                            <div style="margin-bottom: 12px;">
+                                <a href="${url}" class="upload-option-btn" download="${result.fileName}">📄 Excelダウンロード</a>
+                                <p style="margin: 8px 0; color: #666;">処理件数: ${result.processedCount}件 | 合計金額: ¥${result.totalAmount.toLocaleString()}</p>
+                                ${errorMessage}
+                            </div>
+                            <div style="color: #1fa7a2;">Excelファイルが生成されました。上記リンクからダウンロードしてください。</div>
+                        `;
+                    }
                 } else {
                     excelPreview.innerHTML = '<div style="color:#1fa7a2;">Excelファイルが生成されました</div>';
                 }
@@ -186,7 +233,8 @@ window.addEventListener('DOMContentLoaded', () => {
                 excelPreview.innerHTML = `<div style='color:#d00;'>${result.error || 'バッチ処理に失敗しました'}</div>`;
             }
         } catch (err) {
-            excelPreview.innerHTML = `<div style='color:#d00;'>サーバーエラー: ${err.message}</div>`;
+            console.error('バッチ処理エラー:', err);
+            excelPreview.innerHTML = `<div style='color:#d00;'>エラー: ${err.message}</div>`;
         }
     });
 

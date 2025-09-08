@@ -832,22 +832,34 @@ async function generateExcelFile(receiptData) {
 // バッチ処理API（Vercel対応）
 app.post('/api/batch-process', async (req, res) => {
   try {
+    console.log('バッチ処理開始 - ファイル数:', fileStorage.size);
+    
     if (fileStorage.size === 0) {
       return res.status(400).json({ error: 'アップロード画像がありません' });
     }
     
     const receiptData = [];
+    const errors = [];
+    
     for (const [fileId, fileData] of fileStorage.entries()) {
       try {
+        console.log(`OCR処理開始: ${fileId}`);
         const ocrResult = await processReceiptOCR(fileData.buffer);
+        console.log(`OCR処理完了: ${fileId}`, ocrResult);
         receiptData.push(ocrResult);
       } catch (error) {
         console.error(`OCR処理エラー (${fileId}):`, error);
+        errors.push({ fileId, error: error.message });
       }
     }
     
+    console.log('処理結果:', { success: receiptData.length, errors: errors.length });
+    
     if (receiptData.length === 0) {
-      return res.status(500).json({ error: '処理可能な領収書が見つかりませんでした' });
+      return res.status(500).json({ 
+        error: '処理可能な領収書が見つかりませんでした',
+        details: errors
+      });
     }
     
     const workbook = await generateExcelFile(receiptData);
@@ -863,7 +875,8 @@ app.post('/api/batch-process', async (req, res) => {
       fileName: fileName,
       fileData: buffer.toString('base64'),
       processedCount: receiptData.length,
-      totalAmount: receiptData.reduce((sum, receipt) => sum + receipt.amount, 0)
+      totalAmount: receiptData.reduce((sum, receipt) => sum + receipt.amount, 0),
+      errors: errors.length > 0 ? errors : undefined
     });
   } catch (error) {
     console.error('バッチ処理エラー:', error);
@@ -871,24 +884,21 @@ app.post('/api/batch-process', async (req, res) => {
   }
 });
 
-// ExcelプレビューAPI
+// ExcelプレビューAPI（メモリベース対応）
 app.get('/api/excel-preview', async (req, res) => {
   try {
     const file = req.query.file;
     if (!file) return res.status(400).json({ error: 'fileパラメータが必要です' });
-    const filePath = path.join(__dirname, 'downloads', file);
-    if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'ファイルが見つかりません' });
+    
+    // メモリ内のExcelファイルからプレビューを生成
     const workbook = new ExcelJS.Workbook();
-    await workbook.xlsx.readFile(filePath);
+    const buffer = Buffer.from(file, 'base64');
+    await workbook.xlsx.load(buffer);
+    
     const worksheet = workbook.worksheets[0];
     const rows = [];
     worksheet.eachRow((row, rowNumber) => {
-      // 1行目はヘッダー
-      if (rowNumber === 1) {
-        rows.push(row.values.slice(1)); // 0番目は空
-      } else {
-        rows.push(row.values.slice(1));
-      }
+      rows.push(row.values.slice(1)); // 0番目は空
     });
     res.json({ rows });
   } catch (err) {

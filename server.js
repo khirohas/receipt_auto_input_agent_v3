@@ -35,6 +35,11 @@ if (!process.env.OPENAI_API_KEY) {
   process.exit(1);
 }
 
+// ルートエンドポイント
+app.get('/', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
 // ヘルスチェックエンドポイント
 app.get('/health', (req, res) => {
   res.json({ 

@@ -907,35 +907,117 @@ async function generateExcelFile(receiptData) {
   return workbook;
 }
 
-// バッチ処理API（Vercel対応）
+// 並列処理用のセマフォクラス
+class Semaphore {
+  constructor(maxConcurrent) {
+    this.maxConcurrent = maxConcurrent;
+    this.currentConcurrent = 0;
+    this.queue = [];
+  }
+
+  async acquire() {
+    return new Promise((resolve) => {
+      if (this.currentConcurrent < this.maxConcurrent) {
+        this.currentConcurrent++;
+        resolve();
+      } else {
+        this.queue.push(resolve);
+      }
+    });
+  }
+
+  release() {
+    this.currentConcurrent--;
+    if (this.queue.length > 0) {
+      const next = this.queue.shift();
+      this.currentConcurrent++;
+      next();
+    }
+  }
+}
+
+// 並列処理用の画像処理関数
+async function processImageWithSemaphore(semaphore, fileId, fileData) {
+  await semaphore.acquire();
+  try {
+    console.log(`[並列処理] OCR開始: ${fileId} - ${fileData.originalname}`);
+    const startTime = Date.now();
+    
+    const ocrResult = await processReceiptOCR(fileData.buffer);
+    
+    const processingTime = Date.now() - startTime;
+    console.log(`[並列処理] OCR完了: ${fileId} (${processingTime}ms)`);
+    
+    return { success: true, fileId, fileName: fileData.originalname, result: ocrResult };
+  } catch (error) {
+    console.error(`[並列処理] OCRエラー (${fileId} - ${fileData.originalname}):`, error);
+    return { 
+      success: false, 
+      fileId, 
+      fileName: fileData.originalname, 
+      error: error.message 
+    };
+  } finally {
+    semaphore.release();
+  }
+}
+
+// バッチ処理API（並列処理対応）
 app.post('/api/batch-process', async (req, res) => {
   try {
-    console.log('バッチ処理開始 - ファイル数:', fileStorage.size);
+    console.log('🚀 並列バッチ処理開始 - ファイル数:', fileStorage.size);
     
     if (fileStorage.size === 0) {
       return res.status(400).json({ error: 'アップロード画像がありません' });
     }
     
+    // 並列処理の設定
+    const MAX_CONCURRENT = 2; // レート制限を考慮して2に制限
+    const semaphore = new Semaphore(MAX_CONCURRENT);
+    
+    console.log(`⚡ 並列処理設定: 最大同時処理数 ${MAX_CONCURRENT}`);
+    
+    // 全ファイルを並列処理
+    const processPromises = Array.from(fileStorage.entries()).map(([fileId, fileData]) => 
+      processImageWithSemaphore(semaphore, fileId, fileData)
+    );
+    
+    console.log(`📊 処理開始: ${processPromises.length}件の画像を並列処理`);
+    const startTime = Date.now();
+    
+    // 全処理の完了を待機
+    const results = await Promise.allSettled(processPromises);
+    
+    const totalTime = Date.now() - startTime;
+    console.log(`⏱️ 並列処理完了: ${totalTime}ms (平均: ${(totalTime / results.length).toFixed(1)}ms/件)`);
+    
+    // 結果を分類
     const receiptData = [];
     const errors = [];
     
-    for (const [fileId, fileData] of fileStorage.entries()) {
-      try {
-        console.log(`OCR処理開始: ${fileId} - ${fileData.originalname}`);
-        const ocrResult = await processReceiptOCR(fileData.buffer);
-        console.log(`OCR処理完了: ${fileId}`, ocrResult);
-        receiptData.push(ocrResult);
-      } catch (error) {
-        console.error(`OCR処理エラー (${fileId} - ${fileData.originalname}):`, error);
+    results.forEach((result, index) => {
+      if (result.status === 'fulfilled') {
+        const { success, fileId, fileName, result: ocrResult, error } = result.value;
+        if (success) {
+          receiptData.push(ocrResult);
+        } else {
+          errors.push({ fileId, fileName, error });
+        }
+      } else {
         errors.push({ 
-          fileId, 
-          fileName: fileData.originalname,
-          error: error.message 
+          fileId: `unknown_${index}`, 
+          fileName: 'unknown', 
+          error: result.reason?.message || 'Unknown error' 
         });
       }
-    }
+    });
     
-    console.log('処理結果:', { success: receiptData.length, errors: errors.length });
+    console.log('📈 並列処理結果:', { 
+      success: receiptData.length, 
+      errors: errors.length,
+      totalTime: `${totalTime}ms`,
+      averageTime: `${(totalTime / results.length).toFixed(1)}ms/件`
+    });
     
     if (receiptData.length === 0) {
       return res.status(500).json({ 
@@ -944,10 +1026,16 @@ app.post('/api/batch-process', async (req, res) => {
       });
     }
     
+    // Excelファイル生成
+    console.log('📊 Excelファイル生成開始...');
+    const excelStartTime = Date.now();
     const workbook = await generateExcelFile(receiptData);
+    const excelTime = Date.now() - excelStartTime;
+    console.log(`📊 Excelファイル生成完了: ${excelTime}ms`);
+    
     const today = new Date();
     const dateStr = today.getFullYear() + String(today.getMonth() + 1).padStart(2, '0') + String(today.getDate()).padStart(2, '0');
-    const fileName = `${dateStr}領収書一括処理_v2.xlsx`;
+    const fileName = `${dateStr}領収書一括処理_v3_並列処理.xlsx`;
     
     // メモリ内でExcelファイルを生成
     const buffer = await workbook.xlsx.writeBuffer();
@@ -958,7 +1046,13 @@ app.post('/api/batch-process', async (req, res) => {
       fileData: buffer.toString('base64'),
       processedCount: receiptData.length,
       totalAmount: receiptData.reduce((sum, receipt) => sum + receipt.amount, 0),
-      errors: errors.length > 0 ? errors : undefined
+      errors: errors.length > 0 ? errors : undefined,
+      performance: {
+        totalTime: `${totalTime}ms`,
+        averageTime: `${(totalTime / results.length).toFixed(1)}ms/件`,
+        excelTime: `${excelTime}ms`,
+        concurrentProcessing: MAX_CONCURRENT
+      }
     });
   } catch (error) {
     console.error('バッチ処理エラー:', error);

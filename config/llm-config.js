@@ -28,7 +28,7 @@ const LLM_CONFIG = {
   // Google Gemini設定
   gemini: {
     apiKey: process.env.GEMINI_API_KEY,
-    model: process.env.GEMINI_MODEL || 'gemini-1.5-pro',
+    model: process.env.GEMINI_MODEL || 'gemini-1.5-flash',
     maxTokens: parseInt(process.env.GEMINI_MAX_TOKENS) || 1500,
     temperature: parseFloat(process.env.GEMINI_TEMPERATURE) || 0.1,
     timeout: parseInt(process.env.GEMINI_TIMEOUT) || 30000
